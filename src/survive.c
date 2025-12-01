@@ -49,6 +49,7 @@ STATIC_CONFIG_ITEM(LH_0_DISABLE, "lighthouse-0-disable", 'b', "Disable lh at idx
 STATIC_CONFIG_ITEM(LH_1_DISABLE, "lighthouse-1-disable", 'b', "Disable lh at idx 1", 0)
 STATIC_CONFIG_ITEM(LH_2_DISABLE, "lighthouse-2-disable", 'b', "Disable lh at idx 2", 0)
 STATIC_CONFIG_ITEM(LH_3_DISABLE, "lighthouse-3-disable", 'b', "Disable lh at idx 3", 0)
+STATIC_CONFIG_ITEM(IGNORE_CHANNELS, "ignore-channels", 's', "Comma-separated lighthouse channels to ignore", "")
 
 STRUCT_CONFIG_SECTION(SurviveContext)
 STRUCT_CONFIG_ITEM("lighthouse-max-update", "Maximum instant move for a lighthouse", .01, t->settings.lh_max_update);
@@ -80,11 +81,51 @@ int SymnumCheck(const char *path, const char *name, void *location, long size) {
 
 #endif
 
+static void survive_load_ignore_channels(SurviveContext *ctx) {
+	if (ctx->ignore_channel_mask_valid)
+		return;
+
+	memset(ctx->ignore_channel_mask, 0, sizeof(ctx->ignore_channel_mask));
+
+	const char *cfg = survive_configs(ctx, IGNORE_CHANNELS_TAG, SC_GET, "");
+	if (cfg && cfg[0]) {
+		char *cfg_copy = strdup(cfg);
+		if (!cfg_copy) {
+			return;
+		}
+		char *saveptr;
+		for (char *tok = strtok_r(cfg_copy, ",", &saveptr); tok; tok = strtok_r(NULL, ",", &saveptr)) {
+			char *endptr = 0;
+			long channel = strtol(tok, &endptr, 10);
+			if (endptr == tok)
+				continue;
+
+			if (channel >= 0 && channel < NUM_GEN2_LIGHTHOUSES) {
+				ctx->ignore_channel_mask[channel] = true;
+			}
+		}
+		free(cfg_copy);
+	}
+
+	ctx->ignore_channel_mask_valid = true;
+}
+
+SURVIVE_EXPORT bool survive_channel_is_ignored(SurviveContext *ctx, survive_channel channel) {
+	if (channel < 0 || channel >= NUM_GEN2_LIGHTHOUSES)
+		return false;
+
+	if (!ctx->ignore_channel_mask_valid) {
+		survive_load_ignore_channels(ctx);
+	}
+
+	return ctx->ignore_channel_mask[channel];
+}
+
 static void reset_stderr(FILE *f) {
 #ifndef _WIN32
 	fprintf(f, "\033[0m");
 #else
-	HANDLE   hConsole = GetStdHandle(STD_ERROR_HANDLE);
+	HANDLE hConsole = GetStdHandle(STD_ERROR_HANDLE);
 	SetConsoleTextAttribute(hConsole, 7);
 #endif
 }
@@ -93,7 +134,7 @@ static void set_stderr_color(FILE *f, int c) {
 #ifndef _WIN32
 	fprintf(f, "\033[0;31m");
 #else
-	HANDLE   hConsole = GetStdHandle(STD_ERROR_HANDLE);
+	HANDLE hConsole = GetStdHandle(STD_ERROR_HANDLE);
 	SetConsoleTextAttribute(hConsole, c == 1 ? FOREGROUND_RED : (FOREGROUND_INTENSITY | FOREGROUND_RED));
 #endif
 }
@@ -103,7 +144,8 @@ static void survive_default_report_error_process(struct SurviveContext *ctx, Sur
 }
 
 int survive_default_printf_process(struct SurviveContext *ctx, const char *format, ...) {
-  if(ctx->log_target == 0) return 0;
+	if (ctx->log_target == 0)
+		return 0;
 	va_list args;
 	va_start(args, format);
 	int rtn = vfprintf(ctx->log_target, format, args);
@@ -112,7 +154,8 @@ int survive_default_printf_process(struct SurviveContext *ctx, const char *forma
 }
 
 static void survive_default_error(struct SurviveContext *ctx, SurviveError errorCode, const char *fault) {
-  if(ctx->log_target == 0) return;
+	if (ctx->log_target == 0)
+		return;
 	set_stderr_color(ctx->log_target, 2);
 	SURVIVE_INVOKE_HOOK(printf, ctx, "Error %d: %s", errorCode, fault);
 	reset_stderr(ctx->log_target);
@@ -121,16 +164,18 @@ static void survive_default_error(struct SurviveContext *ctx, SurviveError error
 }
 
 static void survive_default_info(struct SurviveContext *ctx, const char *fault) {
-  	survive_recording_info_process(ctx, fault);
-	
-    if(ctx->log_target == 0) return;
+	survive_recording_info_process(ctx, fault);
+
+	if (ctx->log_target == 0)
+		return;
 	SURVIVE_INVOKE_HOOK(printf, ctx, "Info: %s\n", fault);
 	fflush(ctx->log_target);
 }
 
 static void survive_default_warn(struct SurviveContext *ctx, const char *fault) {
-  	survive_recording_info_process(ctx, fault);
-    if(ctx->log_target == 0) return;
+	survive_recording_info_process(ctx, fault);
+	if (ctx->log_target == 0)
+		return;
 	set_stderr_color(ctx->log_target, 1);
 	SURVIVE_INVOKE_HOOK(printf, ctx, "Warning: %s\n", fault);
 	reset_stderr(ctx->log_target);
@@ -202,28 +247,32 @@ static void *button_servicer(void *context) {
 void survive_verify_FLT_size(uint32_t user_size) {
 	if (sizeof(FLT) != user_size) {
 		fprintf(stderr, "FLT type incompatible; the shared library libsurvive has FLT size %lu vs user program %lu\n",
-			(unsigned long)sizeof(FLT), (unsigned long)user_size);
-		fprintf(stderr, "Add '#define FLT %s' before including survive.h or recompile the shared library with the "
-						"appropriate flag. \n",
+				(unsigned long)sizeof(FLT), (unsigned long)user_size);
+		fprintf(stderr,
+				"Add '#define FLT %s' before including survive.h or recompile the shared library with the "
+				"appropriate flag. \n",
 				sizeof(FLT) == sizeof(double) ? "double" : "float");
 		exit(-1);
 	}
 }
 
-static void PrintMatchingDrivers( const char * prefix, const char * matchingparam )
-{
+static void PrintMatchingDrivers(const char *prefix, const char *matchingparam) {
 	int i = 0;
 	char stringmatch[128];
-	snprintf( stringmatch, 127, "%s%s", prefix, matchingparam?matchingparam:"" );
-	const char * DriverName;
-	while ((DriverName = GetDriverNameMatching(stringmatch, i++))) 
-	{
-		printf( "%s ", DriverName+strlen(prefix) );
+	snprintf(stringmatch, 127, "%s%s", prefix, matchingparam ? matchingparam : "");
+	const char *DriverName;
+	while ((DriverName = GetDriverNameMatching(stringmatch, i++))) {
+		printf("%s ", DriverName + strlen(prefix));
 	}
 }
 
 SURVIVE_EXPORT int8_t survive_get_bsd_idx(SurviveContext *ctx, survive_channel channel) {
 	if (channel < 0 || channel >= 16) {
+		return -1;
+	}
+
+	if (survive_channel_is_ignored(ctx, channel)) {
+		SV_INFO("Ignoring lighthouse on channel %d", channel);
 		return -1;
 	}
 
@@ -314,33 +363,34 @@ void survive_init_plugins() {
 }
 static bool disable_colorization = false;
 static void survive_process_env(SurviveContext *ctx, bool only_print) {
-	char ** env;
+	char **env;
 #if defined(WIN) && (_MSC_VER >= 1900)
 	env = *__p__environ();
 #else
-	extern char ** environ;
+	extern char **environ;
 	env = environ;
 #endif
 
 #define ENV_PREFIX "SURVIVE_"
 	for (; *env; ++env) {
-		if(strncmp(*env, ENV_PREFIX, strlen(ENV_PREFIX)) == 0) {
-			const char* entry = *env + strlen(ENV_PREFIX);
-			char tag[32] = { 0 };
-			const char* value = strchr(entry, '=') + 1;
+		if (strncmp(*env, ENV_PREFIX, strlen(ENV_PREFIX)) == 0) {
+			const char *entry = *env + strlen(ENV_PREFIX);
+			char tag[32] = {0};
+			const char *value = strchr(entry, '=') + 1;
 			int offset = value - entry - 1;
-			if(offset > 32) continue;
-			for(int i = 0; i < offset; i++) tag[i] = tolower(entry[i]);
-			if(tag[0]) {
-				if(only_print) {
-					SV_VERBOSE(100, "\t[ENV]'%s'",*env);
+			if (offset > 32)
+				continue;
+			for (int i = 0; i < offset; i++)
+				tag[i] = tolower(entry[i]);
+			if (tag[0]) {
+				if (only_print) {
+					SV_VERBOSE(100, "\t[ENV]'%s'", *env);
 				} else {
 					survive_configs(ctx, tag, SC_OVERRIDE | SC_SET, value);
 				}
 			}
 		}
 	}
-
 }
 
 SurviveContext *survive_init_internal(int argc, char *const *argv, void *userData, log_process_func log_func) {
@@ -383,7 +433,7 @@ SurviveContext *survive_init_internal(int argc, char *const *argv, void *userDat
 	char *const *av = argv + 1;
 	char *const *argvend = argv + argc;
 	int list_for_autocomplete = 0;
-	const char * autocomplete_match[3] = { 0, 0, 0};
+	const char *autocomplete_match[3] = {0, 0, 0};
 	int showhelp = 0;
 	bool showversion = false;
 	for (; av < argvend; av++) {
@@ -404,11 +454,14 @@ SurviveContext *survive_init_internal(int argc, char *const *argv, void *userDat
 				vartoupdate = "lighthousecount";
 				break;
 			case 'm':
-				if( av + 1 < argvend ) autocomplete_match[0] = *(av+1);
-				if( av + 2 < argvend ) autocomplete_match[1] = *(av+2);
-				if( av + 3 < argvend ) autocomplete_match[2] = *(av+3);
+				if (av + 1 < argvend)
+					autocomplete_match[0] = *(av + 1);
+				if (av + 2 < argvend)
+					autocomplete_match[1] = *(av + 2);
+				if (av + 3 < argvend)
+					autocomplete_match[2] = *(av + 3);
 				list_for_autocomplete = 1;
-				av = argvend; //Eject immediately after processing -m
+				av = argvend; // Eject immediately after processing -m
 				break;
 			case 'c':
 				vartoupdate = "configfile";
@@ -481,8 +534,8 @@ SurviveContext *survive_init_internal(int argc, char *const *argv, void *userDat
 	SV_VERBOSE(5, "Config file is %.512s", config_path);
 
 	SV_VERBOSE(100, "Args: ");
-	for(int i = 0;i < argc;i++) {
-		SV_VERBOSE(100, "\t'%s'",argv[i]);
+	for (int i = 0; i < argc; i++) {
+		SV_VERBOSE(100, "\t'%s'", argv[i]);
 	}
 	survive_process_env(ctx, true);
 
@@ -519,14 +572,14 @@ SurviveContext *survive_init_internal(int argc, char *const *argv, void *userDat
 		survive_kalman_lighthouse_init(ctx->bsd[i].tracker, ctx, i);
 	};
 
-	if( list_for_autocomplete )
-	{
-		const char * lastparam = (autocomplete_match[2]==0)?autocomplete_match[1]:autocomplete_match[2];
-		const char * matchingparam = (autocomplete_match[2]==0)?0:autocomplete_match[1];
+	if (list_for_autocomplete) {
+		const char *lastparam = (autocomplete_match[2] == 0) ? autocomplete_match[1] : autocomplete_match[2];
+		const char *matchingparam = (autocomplete_match[2] == 0) ? 0 : autocomplete_match[1];
 
 		// First see if any of the parameters perfectly match a config item, if so print some help.
-		const char * checkconfig = matchingparam;
-		if( matchingparam == 0 ) checkconfig = lastparam;
+		const char *checkconfig = matchingparam;
+		if (matchingparam == 0)
+			checkconfig = lastparam;
 
 		if (checkconfig && strlen(checkconfig) > 2 && survive_print_help_for_parameter(ctx, checkconfig + 2)) {
 			exit(0);
@@ -536,17 +589,15 @@ SurviveContext *survive_init_internal(int argc, char *const *argv, void *userDat
 			PrintMatchingDrivers("Poser", matchingparam);
 		else if (lastparam && strstr(lastparam, "disambiguator"))
 			PrintMatchingDrivers("Disambiguator", matchingparam);
-		else
-		{
-			printf( "-h -m -p -l -c " );
-			survive_print_known_configs( ctx, 0 );
+		else {
+			printf("-h -m -p -l -c ");
+			survive_print_known_configs(ctx, 0);
 		}
-		printf( "\n" );
-		exit( 0 );
+		printf("\n");
+		exit(0);
 	}
 
-	if( showhelp )
-	{
+	if (showhelp) {
 		// Can't use SV_GENERAL_ERROR here since we don't have a context to send to yet.
 		fprintf(stderr, "libsurvive version %s\n", survive_build_tag());
 		fprintf(stderr, "Available flags:\n");
@@ -556,7 +607,7 @@ SurviveContext *survive_init_internal(int argc, char *const *argv, void *userDat
 		fprintf(stderr, " -l [lighthouse count]   - use a specific number of lighthouses.\n");
 		fprintf(stderr, " -c [config file]        - set config file\n\n");
 
-		survive_print_known_configs( ctx, 1 );
+		survive_print_known_configs(ctx, 1);
 		return 0;
 	}
 	if (showversion) {
@@ -619,24 +670,26 @@ static inline SurviveDeviceDriverReturn callDriver(SurviveContext *ctx, const ch
 	if (r < 0) {
 		SV_WARN("Driver %s reports status %d", DriverName + strlen("DriverReg"), r);
 		return r;
-	}
-	else {
+	} else {
 		strcat(buffer, DriverName + strlen("DriverReg"));
 		strcat(buffer, ", ");
 	}
 	return r;
 }
 
-static void warn_missing_drivers(SurviveContext *ctx, const char* name) {
-  int manually_enabled = survive_config_is_set(ctx, name);
-  char buffer[64];
-  snprintf(buffer, 64, "DriverReg%s", name);
-  const void* driver = GetDriverNameMatching(buffer, 0);
-  if(manually_enabled && driver == 0) {
-    SV_WARN("Could not find manually specified driver '%s'. Please make sure it is configured to build (eg ENABLE_driver_%s is 'ON' in CMakeCache.txt) and has all required dependencies. Run with an environment variable `SURVIVE_PLUGIN_DEBUG=1` for information on the plugin search path(s).", name, name);
-    SV_INFO("Available drivers:");
-    ListDrivers();
-  }
+static void warn_missing_drivers(SurviveContext *ctx, const char *name) {
+	int manually_enabled = survive_config_is_set(ctx, name);
+	char buffer[64];
+	snprintf(buffer, 64, "DriverReg%s", name);
+	const void *driver = GetDriverNameMatching(buffer, 0);
+	if (manually_enabled && driver == 0) {
+		SV_WARN("Could not find manually specified driver '%s'. Please make sure it is configured to build (eg "
+				"ENABLE_driver_%s is 'ON' in CMakeCache.txt) and has all required dependencies. Run with an "
+				"environment variable `SURVIVE_PLUGIN_DEBUG=1` for information on the plugin search path(s).",
+				name, name);
+		SV_INFO("Available drivers:");
+		ListDrivers();
+	}
 }
 
 int survive_startup(SurviveContext *ctx) {
@@ -659,7 +712,7 @@ int survive_startup(SurviveContext *ctx) {
 	warn_missing_drivers(ctx, "openvr");
 	warn_missing_drivers(ctx, "playback");
 	warn_missing_drivers(ctx, "usbmon");
-	
+
 	bool loadDefaultDriver = true;
 	char buffer[1024] = "Loaded drivers: ";
 	{
@@ -684,7 +737,7 @@ int survive_startup(SurviveContext *ctx) {
 					int driverReturn = callDriver(ctx, DriverName, buffer); // == SURVIVE_DRIVER_NORMAL
 					// Auto drivers dont preclude the default HTC driver
 					if (manually_enabled && driverReturn != SURVIVE_DRIVER_PASSIVE) {
-						loadDefaultDriver = false; 
+						loadDefaultDriver = false;
 					}
 				}
 			}
@@ -987,7 +1040,7 @@ int survive_haptic(SurviveObject *so, FLT freq, FLT amp, FLT duration) {
 void survive_output_callback_stats(SurviveContext *ctx) {
 	SV_VERBOSE(10, "Callback statistics:");
 #define SURVIVE_HOOK_PROCESS_DEF(hook)                                                                                 \
-	SV_VERBOSE(10, "\t%-20s cnt: %7d avg time: %.7fms max time: %.7fms cnt over 1ms: %5d(%.7f%%)", #hook,               \
+	SV_VERBOSE(10, "\t%-20s cnt: %7d avg time: %.7fms max time: %.7fms cnt over 1ms: %5d(%.7f%%)", #hook,              \
 			   ctx->hook##_call_cnt, 1000. * ctx->hook##_call_time / (1e-5 + ctx->hook##_call_cnt),                    \
 			   ctx->hook##_max_call_time * 1000., ctx->hook##_call_over_cnt,                                           \
 			   ctx->hook##_call_over_cnt / (FLT)(ctx->hook##_call_cnt + .0001));                                       \
